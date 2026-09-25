@@ -209,10 +209,7 @@ def benchmark_model(
                             raise RuntimeError(f"Cannot create video: {row.video_path}")
                     draw_detections(frame, detections)
                     current_fps = 1.0 / max(elapsed, 1e-9)
-                    cv2.putText(
-                        frame, f"{row.name} | conf {threshold:.2f} | FPS {current_fps:.2f} | latency {elapsed * 1000:.2f} ms",
-                        (10, 30), cv2.FONT_HERSHEY_SIMPLEX, 0.65, (0, 220, 220), 2,
-                    )
+                    draw_metrics(frame, row.name, threshold, current_fps, elapsed * 1000)
                     writer.write(frame)
                 if frame_index >= warmup:
                     timings.append(elapsed)
@@ -231,6 +228,22 @@ def benchmark_model(
     except Exception as exc:
         row.error = f"{type(exc).__name__}: {exc}"
     return row
+
+def draw_metrics(frame: Any, model_name: str, threshold: float, fps: float, latency_ms: float) -> None:
+    height, width = frame.shape[:2]
+    lines = [
+        model_name,
+        f"conf {threshold:.2f} | FPS {fps:.2f}",
+        f"latency {latency_ms:.2f} ms",
+    ]
+    for index, text in enumerate(lines):
+        base_scale = 0.55
+        text_width = cv2.getTextSize(text, cv2.FONT_HERSHEY_SIMPLEX, base_scale, 1)[0][0]
+        scale = base_scale * min(1.0, (width - 20) / max(text_width, 1))
+        cv2.putText(
+            frame, text, (10, 20 + index * 18), cv2.FONT_HERSHEY_SIMPLEX,
+            scale, (0, 220, 220), 1, cv2.LINE_AA,
+        )
 
 
 def fmt(value: float | None, digits: int = 2) -> str:

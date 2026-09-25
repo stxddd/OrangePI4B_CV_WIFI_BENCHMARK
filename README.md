@@ -103,21 +103,18 @@ sudo nmcli connection modify OrangePi-Client ipv4.method manual ipv4.addresses 1
 sudo nmcli connection up OrangePi-Client
 ```
 
-Подключение к Orange Pi A по SSH:
+На этом шаге ОБА устройства будут находится в одной изолированной сети.
 
-```bash
-ssh orangepi@192.168.50.1
-```
 
 ### 3. Запуск
 
-Сначала на приёмнике запускается benchmark без аргументов:
+Сначала на приёмнике запускается benchmark
 
 ```bash
 python benchmark_onnx_models.py
 ```
 
-Затем на устройстве-источнике запускается передатчик с веб-камерой:
+Затем на источнике запускается передатчик:
 
 ```bash
 python sender.py camera
@@ -128,13 +125,12 @@ python sender.py camera
 ```bash
 python sender.py video /path/to/video.mp4
 ```
-По умолчанию обрабатываются первые `400` кадров. Чтобы изменить количество кадров, например на `800`, запустите:
+
+Чтобы изменить количество кадров:
 
 ```bash
-python benchmark_onnx_models.py --max-frames 800
+python benchmark_onnx_models.py --max-frames 50
 ```
-
-Для Wi-Fi нужно указывать положительное количество кадров.
 
 Передатчик использует фиксированные настройки: камера `/dev/video0`, размер `320x240`, частота `15 FPS`, JPEG quality `75`, приёмник `192.168.50.2`.
 
@@ -153,12 +149,4 @@ python benchmark_onnx_models.py --max-frames 800
 Результаты сохраняются в `benchmark_results/results.csv` и в аннотированные ролики по каждой модели.
 
 
-## Текущие ограничения
-
-- UDP не гарантирует доставку и порядок пакетов; потеря фрагмента делает JPEG-кадр непригодным.
-- Wi-Fi-режим накапливает кадры до запуска инференса, чтобы все модели получили одинаковую выборку.
-
-- `wifi_rtt_ms` записывается в CSV отдельно от latency инференса.
-
-Разные модели используют собственные preprocess/decode-функции, поэтому `wifi_source.py` отдаёт исходный BGR-кадр и не вмешивается в обработку модели.
 
