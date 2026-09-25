@@ -72,10 +72,19 @@ def load_wifi_frames(
     receive_timeout: float,
     control_port: int = CONTROL_PORT,
 ) -> tuple[list[np.ndarray], float | None]:
+    frames = list(iter_wifi_frames(sender_ip, port, frame_count, receive_timeout))
+    return frames, measure_rtt(sender_ip, control_port)
+
+
+def iter_wifi_frames(
+    sender_ip: str,
+    port: int,
+    frame_count: int,
+    receive_timeout: float,
+):
     if frame_count <= 0:
         raise ValueError("--max-frames must be greater than zero")
 
-    frames: list[np.ndarray] = []
     parts: dict[int, dict[int, bytes]] = {}
     sizes: dict[int, int] = {}
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as sock:
@@ -83,13 +92,14 @@ def load_wifi_frames(
         sock.settimeout(receive_timeout)
         sock.bind(("0.0.0.0", port))
         print(f"Ожидание Wi-Fi-кадров от {sender_ip}:{port}", flush=True)
-        while len(frames) < frame_count:
+        frames_received = 0
+        while frames_received < frame_count:
             try:
                 jpeg = receive_jpeg(sock, sender_ip, parts, sizes)
             except socket.timeout as exc:
                 raise TimeoutError("Не дождались полного JPEG-кадра по Wi-Fi") from exc
             frame = cv2.imdecode(np.frombuffer(jpeg, dtype=np.uint8), cv2.IMREAD_COLOR)
             if frame is not None:
-                frames.append(frame)
-    return frames, measure_rtt(sender_ip, control_port)
+                frames_received += 1
+                yield frame
 

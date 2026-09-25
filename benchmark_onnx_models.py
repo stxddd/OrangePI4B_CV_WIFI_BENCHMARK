@@ -6,7 +6,7 @@ import importlib.util
 import math
 import sys
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 
 from inference_common import create_session, draw_detections
-from wifi_source import load_wifi_frames
+from wifi_source import iter_wifi_frames, load_wifi_frames, measure_rtt
 
 try:
     import onnx
@@ -91,6 +91,7 @@ OUTPUT_CSV = OUTPUT_DIR / "results.csv"
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Benchmark ONNX models on Wi-Fi frames")
     parser.add_argument("--max-frames", type=int, default=400, help="Maximum frames to process (default: 400)")
+    parser.add_argument("--live", action="store_true", help="Process frames as they arrive instead of buffering them")
     return parser.parse_args()
 
 
@@ -230,7 +231,7 @@ def benchmark_model(
     return row
 
 def draw_metrics(frame: Any, model_name: str, threshold: float, fps: float, latency_ms: float) -> None:
-    height, width = frame.shape[:2]
+    width = frame.shape[1]
     lines = [
         model_name,
         f"conf {threshold:.2f} | FPS {fps:.2f}",
@@ -244,6 +245,110 @@ def draw_metrics(frame: Any, model_name: str, threshold: float, fps: float, late
             frame, text, (10, 20 + index * 18), cv2.FONT_HERSHEY_SIMPLEX,
             scale, (0, 220, 220), 1, cv2.LINE_AA,
         )
+
+
+@dataclass
+class LiveRunner:
+    path: Path
+    row: ModelRow
+    module: ModuleType
+    session: Any
+    input_name: str
+    decode: Any
+    timings: list[float] = field(default_factory=list)
+    writer: Any = None
+
+
+def create_live_runner(path: Path, wifi_rtt_ms: float | None) -> LiveRunner:
+    model = onnx.load(str(path), load_external_data=False)
+    row = ModelRow(
+        DISPLAY_NAMES.get(path.stem, path.stem), path,
+        params_m=sum(math.prod(item.dims) for item in model.graph.initializer) / 1e6,
+        gmacs=estimate_gmacs(model),
+        size_mb=path.stat().st_size / 1048576,
+        wifi_rtt_ms=wifi_rtt_ms,
+    )
+    module = load_module(path, ROOT)
+    session = create_session(path.resolve(), THREADS)
+    decode = getattr(module, "decode", None)
+    if decode is None:
+        decode = getattr(module, "decode_single", None) or getattr(module, "decode_pico", None)
+    if decode is None:
+        raise AttributeError(f"No decoder in {SCRIPT_BY_MODEL[path.stem]}")
+    safe_name = "".join(char if char.isalnum() or char in "-_" else "_" for char in row.name)
+    row.video_path = OUTPUT_DIR / f"{safe_name}_live.mp4"
+    return LiveRunner(path, row, module, session, session.get_inputs()[0].name, decode)
+
+
+def process_live_frame(runner: LiveRunner, frame: Any, frame_index: int) -> None:
+    row = runner.row
+    start = time.perf_counter()
+    input_tensor = runner.module.preprocess(frame)
+    outputs = runner.session.run(None, {runner.input_name: input_tensor})
+    threshold = THRESHOLDS.get(runner.path.stem, 0.35)
+    detections = runner.decode(outputs, frame.shape, threshold)
+    elapsed = time.perf_counter() - start
+
+    if runner.writer is None:
+        height, width = frame.shape[:2]
+        OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+        runner.writer = cv2.VideoWriter(
+            str(row.video_path), cv2.VideoWriter_fourcc(*"mp4v"),
+            SOURCE_FPS, (width, height),
+        )
+        if not runner.writer.isOpened():
+            raise RuntimeError(f"Cannot create video: {row.video_path}")
+    output_frame = frame.copy()
+    draw_detections(output_frame, detections)
+    draw_metrics(output_frame, row.name, threshold, 1.0 / max(elapsed, 1e-9), elapsed * 1000)
+    runner.writer.write(output_frame)
+
+    if frame_index >= WARMUP:
+        runner.timings.append(elapsed)
+    row.frames += 1
+
+
+def finish_live_runner(runner: LiveRunner) -> None:
+    if runner.writer is not None:
+        runner.writer.release()
+    if runner.row.error:
+        return
+    if not runner.timings:
+        runner.row.error = "RuntimeError: No measured frames after warmup"
+        return
+    runner.row.avg_latency_ms = sum(runner.timings) / len(runner.timings) * 1000
+    runner.row.min_latency_ms = min(runner.timings) * 1000
+    runner.row.max_latency_ms = max(runner.timings) * 1000
+    fps = [1 / timing for timing in runner.timings]
+    runner.row.avg_fps = sum(fps) / len(fps)
+    runner.row.min_fps = min(fps)
+    runner.row.max_fps = max(fps)
+
+
+def benchmark_live(paths: list[Path], max_frames: int) -> list[ModelRow]:
+    rows: list[ModelRow] = []
+    for path in paths:
+        try:
+            runner = create_live_runner(path, None)
+            print(f"Live model: {runner.row.name}; waiting for {max_frames} fresh frames", flush=True)
+            try:
+                for frame_index, frame in enumerate(iter_wifi_frames(SENDER_IP, PORT, max_frames, RECEIVE_TIMEOUT)):
+                    process_live_frame(runner, frame, frame_index)
+            except Exception as exc:
+                runner.row.error = f"{type(exc).__name__}: {exc}"
+            finally:
+                finish_live_runner(runner)
+            rows.append(runner.row)
+        except Exception as exc:
+            rows.append(ModelRow(
+                DISPLAY_NAMES.get(path.stem, path.stem), path,
+                error=f"{type(exc).__name__}: {exc}",
+            ))
+
+    wifi_rtt_ms = measure_rtt(SENDER_IP, CONTROL_PORT)
+    for row in rows:
+        row.wifi_rtt_ms = wifi_rtt_ms
+    return rows
 
 
 def fmt(value: float | None, digits: int = 2) -> str:
@@ -288,21 +393,25 @@ def main() -> None:
     args = parse_args()
     if args.max_frames <= 0:
         raise SystemExit("--max-frames must be greater than zero")
-    frames, wifi_rtt_ms = load_wifi_frames(
-        SENDER_IP, PORT, args.max_frames, RECEIVE_TIMEOUT, CONTROL_PORT,
-    )
     source_fps = SOURCE_FPS
     source_name = f"wifi://{SENDER_IP}:{PORT}"
-    if not frames:
-        raise SystemExit("No frames received from source")
     paths = [path for path in sorted(ROOT.rglob("*.onnx")) if "venv" not in path.parts and path.stem in SCRIPT_BY_MODEL]
     if not paths:
         raise SystemExit(f"No supported ONNX models found under {ROOT}")
-    print(f"Benchmark: {source_name}; frames={len(frames)}; warmup={WARMUP}; threads={THREADS}")
-    rows = []
-    for index, path in enumerate(paths, 1):
-        print(f"[{index}/{len(paths)}] {DISPLAY_NAMES.get(path.stem, path.stem)}...", flush=True)
-        rows.append(benchmark_model(path, ROOT, frames, source_fps, wifi_rtt_ms, WARMUP, args.max_frames, THREADS, OUTPUT_DIR))
+    if args.live:
+        print(f"Live benchmark: {source_name}; frames={args.max_frames}; warmup={WARMUP}; threads={THREADS}")
+        rows = benchmark_live(paths, args.max_frames)
+    else:
+        frames, wifi_rtt_ms = load_wifi_frames(
+            SENDER_IP, PORT, args.max_frames, RECEIVE_TIMEOUT, CONTROL_PORT,
+        )
+        if not frames:
+            raise SystemExit("No frames received from source")
+        print(f"Benchmark: {source_name}; frames={len(frames)}; warmup={WARMUP}; threads={THREADS}")
+        rows = []
+        for index, path in enumerate(paths, 1):
+            print(f"[{index}/{len(paths)}] {DISPLAY_NAMES.get(path.stem, path.stem)}...", flush=True)
+            rows.append(benchmark_model(path, ROOT, frames, source_fps, wifi_rtt_ms, WARMUP, args.max_frames, THREADS, OUTPUT_DIR))
     print_table(rows, source_name)
     write_csv(rows, OUTPUT_CSV)
     print(f"CSV written to: {OUTPUT_CSV}")
