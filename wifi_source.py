@@ -3,7 +3,6 @@ from __future__ import annotations
 import socket
 import struct
 import time
-from pathlib import Path
 
 import cv2
 import numpy as np
@@ -74,7 +73,7 @@ def load_wifi_frames(
     control_port: int = CONTROL_PORT,
 ) -> tuple[list[np.ndarray], float | None]:
     if frame_count <= 0:
-        raise ValueError("--max-frames must be greater than zero for --source wifi")
+        raise ValueError("--max-frames must be greater than zero")
 
     frames: list[np.ndarray] = []
     parts: dict[int, dict[int, bytes]] = {}
@@ -94,19 +93,3 @@ def load_wifi_frames(
                 frames.append(frame)
     return frames, measure_rtt(sender_ip, control_port)
 
-
-def load_video_frames(video: Path, frame_count: int) -> tuple[list[np.ndarray], float]:
-    capture = cv2.VideoCapture(str(video))
-    if not capture.isOpened():
-        raise RuntimeError(f"Cannot open video: {video}")
-    frames: list[np.ndarray] = []
-    try:
-        while frame_count == 0 or len(frames) < frame_count:
-            ok, frame = capture.read()
-            if not ok:
-                break
-            frames.append(frame)
-        fps = capture.get(cv2.CAP_PROP_FPS)
-    finally:
-        capture.release()
-    return frames, fps if fps and fps > 0 else 25.0

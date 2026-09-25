@@ -27,26 +27,20 @@ PONG = b"OP-PONG"
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Send camera or video frames over UDP")
-    parser.add_argument("--source", choices=("camera", "video"), default="camera")
-    parser.add_argument("--video", type=Path, help="Video file used with --source video")
-    parser.add_argument("--camera", default=CAMERA_DEVICE, help="Camera device used with --source camera")
-    parser.add_argument("--receiver-ip", default=RECEIVER_IP)
-    parser.add_argument("--port", type=int, default=DEFAULT_PORT)
-    parser.add_argument("--control-port", type=int, default=CONTROL_PORT)
-    parser.add_argument("--fps", type=float, default=FRAME_RATE)
-    parser.add_argument("--jpeg-quality", type=int, default=JPEG_QUALITY)
+    parser.add_argument("source", choices=("camera", "video"))
+    parser.add_argument("video", type=Path, nargs="?", help="Video file used with video mode")
     return parser.parse_args()
 
 
 def open_capture(args: argparse.Namespace) -> cv2.VideoCapture:
     if args.source == "video":
         if args.video is None:
-            raise SystemExit("--video is required when --source video is selected")
+            raise SystemExit("Video path is required in video mode")
         if not args.video.exists():
             raise SystemExit(f"Video not found: {args.video}")
         capture = cv2.VideoCapture(str(args.video))
     else:
-        camera_source: int | str = int(args.camera) if str(args.camera).isdigit() else args.camera
+        camera_source: int | str = CAMERA_DEVICE
         if os.name == "nt":
             capture = cv2.VideoCapture(camera_source)
         else:
@@ -54,9 +48,9 @@ def open_capture(args: argparse.Namespace) -> cv2.VideoCapture:
         capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, FRAME_WIDTH)
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, FRAME_HEIGHT)
-        capture.set(cv2.CAP_PROP_FPS, args.fps)
+        capture.set(cv2.CAP_PROP_FPS, FRAME_RATE)
     if not capture.isOpened():
-        raise RuntimeError(f"Cannot open {args.source}: {args.video if args.source == 'video' else args.camera}")
+        raise RuntimeError(f"Cannot open {args.source}: {args.video if args.source == 'video' else CAMERA_DEVICE}")
     return capture
 
 
@@ -82,13 +76,13 @@ def main() -> None:
     args = parse_args()
     capture = open_capture(args)
 
-    address = (args.receiver_ip, args.port)
-    source_name = args.camera if args.source == "camera" else args.video
+    address = (RECEIVER_IP, DEFAULT_PORT)
+    source_name = CAMERA_DEVICE if args.source == "camera" else args.video
     print(f"Источник {source_name} открыт; отправка на {address[0]}:{address[1]}", flush=True)
-    threading.Thread(target=latency_responder, args=(args.control_port,), daemon=True).start()
-    interval = 1.0 / args.fps
+    threading.Thread(target=latency_responder, args=(CONTROL_PORT,), daemon=True).start()
+    interval = 1.0 / FRAME_RATE
     frame_id = 0
-    encode_options = [cv2.IMWRITE_JPEG_QUALITY, args.jpeg_quality]
+    encode_options = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
     sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     
     try:

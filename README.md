@@ -7,14 +7,6 @@
 
 Цель проекта - измерить работу моделей в условиях, близких к реальному использованию: кадр должен пройти через Wi-Fi, быть восстановлен на Orange Pi и только после этого попасть в инференс.
 
-## Состав проекта
-
-В этом каталоге уже объединены:
-
-- `sender.py` - передача кадров с камеры или видеофайла по UDP;
-- `wifi_source.py` - сборка UDP-фрагментов, декодирование JPEG и измерение RTT;
-- `benchmark_onnx_models.py` - общий бенчмарк ONNX-моделей для источников `video` и `wifi`;
-- каталоги инференса и ONNX-модели из `CV_benchmark`.
 
 
 ## Архитектура
@@ -54,7 +46,7 @@ JPEG-фрагменты обычно имеют размер `1200` байт.
 
 ## Предполагаемое распределение устройств
 
-| Устройство | Роль | Адрес по умолчанию |
+| Устройство | Роль | Адрес |
 |---|---|---|
 | Orange Pi 4B 1 | источник кадров и UDP-передатчик | `192.168.50.1` |
 | Orange Pi 4B 2 | приём кадров и инференс | `192.168.50.2` |
@@ -77,8 +69,9 @@ python -m pip install -r requirements.txt
 
 Пример схемы с точкой доступа на устройстве-источнике:
 
-### 1. Orange Pi 1
+### 1. Orange Pi 4B 1
 
+Установка зависимостей 
 ```bash
 sudo apt update
 sudo apt install -y network-manager openssh-server python3-opencv v4l-utils dnsmasq
@@ -89,7 +82,7 @@ sudo nmcli connection modify OrangePi-AP ipv4.method shared ipv4.addresses 192.1
 sudo nmcli connection up OrangePi-AP
 ```
 
-### 2. Orange Pi 2
+### 2. Orange Pi 4B 2
 
 Установка зависимостей 
 ```bash
@@ -100,8 +93,6 @@ source .venv/bin/activate
 python -m pip install --upgrade pip
 python -m pip install -r requirements.txt
 ```
-
-
 
 Подключение к точке доступа
 ```bash
@@ -120,76 +111,32 @@ ssh orangepi@192.168.50.1
 
 ### 3. Запуск
 
-На устройстве-источнике запускается передатчик с камерой:
+Сначала на приёмнике запускается benchmark без аргументов:
 
 ```bash
-python sender.py --source camera --receiver-ip 192.168.50.2
+python benchmark_onnx_models.py
 ```
 
-По умолчанию передатчик читает `/dev/video0`, передаёт кадры размером `320x240` с частотой `15 FPS` и качеством JPEG `75`. Устройство и параметры можно изменить:
+Затем на устройстве-источнике запускается передатчик с веб-камерой:
 
 ```bash
-python sender.py --source camera --camera /dev/video2 --fps 20 --jpeg-quality 80
+python sender.py camera
 ```
 
-В Windows номер камеры можно указать числом, например `--camera 0`.
-
-Для передачи готового видеофайла используется тот же передатчик:
+Для передачи видеофайла:
 
 ```bash
-python sender.py source video video /path/to/video.mp4 
+python sender.py video /path/to/video.mp4
 ```
-
-Файл передаётся от начала до конца, после чего передатчик завершается. В обоих режимах кадры кодируются в JPEG и отправляются по UDP.
-
-## Запуск бенчмарка
-
-Файловый источник:
+По умолчанию обрабатываются первые `400` кадров. Чтобы изменить количество кадров, например на `800`, запустите:
 
 ```bash
-python benchmark_onnx_models.py \
-  --source video \
-  --models yolo8n \
-  --video /path/to/test.mp4 \
-  --threads 4 \
-  --warmup 20
+python benchmark_onnx_models.py --max-frames 800
 ```
 
-Wi-Fi-источник на Orange Pi 4B:
+Для Wi-Fi нужно указывать положительное количество кадров.
 
-```bash
-python benchmark_onnx_models.py \
-  --source wifi \
-  --sender-ip 192.168.50.1 \
-  --port 5000 \
-  --control-port 5001 \
-  --source-fps 15 \
-  --models yolo8n \
-  --max-frames 400 \
-  --threads 4 \
-  --warmup 20
-```
-
-Для запуска всех моделей из Wi-Fi-потока:
-
-```bash
-python benchmark_onnx_models.py \
-  --source wifi \
-  --sender-ip 192.168.50.1 \
-  --threads 4 \
-  --warmup 20 \
-  --output-dir benchmark_results/all \
-  --output-csv benchmark_results/all.csv
-```
-
-Доступные псевдонимы моделей:
-
-```text
-efficientdet nanodet picodet ssd_v2 leyolo_nano
-yolo5n yolo8n yolo10n yolo11n yolo26n
-```
-
-По умолчанию обрабатываются первые `400` кадров. Значение `--max-frames 0` означает обработку до конца видео; для Wi-Fi нужно указать положительное количество кадров. При Wi-Fi-режиме кадры сначала накапливаются, затем используются всеми моделями.
+Передатчик использует фиксированные настройки: камера `/dev/video0`, размер `320x240`, частота `15 FPS`, JPEG quality `75`, приёмник `192.168.50.2`.
 
 ## Метрики
 
@@ -203,20 +150,15 @@ yolo5n yolo8n yolo10n yolo11n yolo26n
 - число потерянных или неполных кадров;
 - параметры модели: размер файла, число параметров, оценку GMACs и входное разрешение.
 
-Результаты сохраняются в CSV. При включённом выводе видео также сохраняется аннотированный ролик с рамками, confidence, FPS и latency.
+Результаты сохраняются в `benchmark_results/results.csv` и в аннотированные ролики по каждой модели.
 
-Важно: latency инференса и Wi-Fi RTT - разные величины. RTT измеряет сетевой обмен контрольным пакетом, а latency модели измеряет обработку уже принятого кадра. Полная задержка кадра должна рассчитываться отдельно, если в протокол добавить временные метки отправки и приёма.
 
 ## Текущие ограничения
 
 - UDP не гарантирует доставку и порядок пакетов; потеря фрагмента делает JPEG-кадр непригодным.
 - Wi-Fi-режим накапливает кадры до запуска инференса, чтобы все модели получили одинаковую выборку.
-- Текущий протокол не содержит timestamp кадра, поэтому RTT не является полной end-to-end задержкой.
+
 - `wifi_rtt_ms` записывается в CSV отдельно от latency инференса.
 
 Разные модели используют собственные preprocess/decode-функции, поэтому `wifi_source.py` отдаёт исходный BGR-кадр и не вмешивается в обработку модели.
 
-## Исходные проекты
-
-- `CV_benchmark` - источник ONNX-моделей, preprocess/decode и расчёт benchmark-метрик.
-- `OrangePi4b_Connections/yolo_wifi_stream` - исходный UDP-проект, код которого перенесён в текущий каталог.

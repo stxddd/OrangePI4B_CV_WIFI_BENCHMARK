@@ -14,7 +14,7 @@ from typing import Any
 import cv2
 
 from inference_common import create_session, draw_detections
-from wifi_source import load_video_frames, load_wifi_frames
+from wifi_source import load_wifi_frames
 
 try:
     import onnx
@@ -76,41 +76,21 @@ THRESHOLDS = {
     "ssd_mobilenet_v2": 0.55,
 }
 
-MODEL_ALIASES = {
-    "efficientdet": "efficientdet_lite0",
-    "nanodet": "nanodet-plus-m-1.5x_320",
-    "picodet": "picodet_s_320_coco",
-    "ssd_v2": "ssd_mobilenet_v2",
-    "leyolo_nano": "LeYOLONano",
-    "yolo5n": "yolov5nu",
-    "yolo8n": "yolov8n",
-    "yolo10n": "yolov10n",
-    "yolo11n": "yolo11n",
-    "yolo26n": "yolo26n",
-}
+ROOT = Path(__file__).resolve().parent
+SENDER_IP = "192.168.50.1"
+PORT = 5000
+CONTROL_PORT = 5001
+RECEIVE_TIMEOUT = 10.0
+SOURCE_FPS = 15.0
+WARMUP = 10
+THREADS = 4
+OUTPUT_DIR = ROOT / "benchmark_results"
+OUTPUT_CSV = OUTPUT_DIR / "results.csv"
 
 
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Benchmark ONNX models on video or Wi-Fi frames")
-    root = Path(__file__).resolve().parent
-    parser.add_argument("--root", type=Path, default=root)
-    parser.add_argument("--source", choices=("video", "wifi"), default="video")
-    parser.add_argument("--video", type=Path, default=root / "test.mp4")
-    parser.add_argument("--sender-ip", default="192.168.50.1")
-    parser.add_argument("--port", type=int, default=5000)
-    parser.add_argument("--control-port", type=int, default=5001)
-    parser.add_argument("--receive-timeout", type=float, default=10.0)
-    parser.add_argument("--source-fps", type=float, default=15.0)
+    parser = argparse.ArgumentParser(description="Benchmark ONNX models on Wi-Fi frames")
     parser.add_argument("--max-frames", type=int, default=400, help="Maximum frames to process (default: 400)")
-    parser.add_argument("--warmup", type=int, default=10)
-    parser.add_argument("--threads", type=int, default=4)
-    parser.add_argument(
-        "--models", nargs="+", choices=sorted(MODEL_ALIASES),
-        help="Models to test; omit to test all models",
-    )
-    parser.add_argument("--output-csv", type=Path)
-    parser.add_argument("--output-dir", type=Path, default=root / "benchmark_results")
-    parser.add_argument("--no-video", action="store_true", help="Do not save annotated videos")
     return parser.parse_args()
 
 
@@ -293,41 +273,26 @@ def write_csv(rows: list[ModelRow], path: Path) -> None:
 
 def main() -> None:
     args = parse_args()
-    root = args.root.resolve()
-    wifi_rtt_ms = None
-    if args.source == "video":
-        video = args.video.resolve()
-        if not video.exists():
-            raise SystemExit(f"Video not found: {video}")
-        frames, source_fps = load_video_frames(video, args.max_frames)
-        source_name = str(video)
-    else:
-        if args.max_frames <= 0:
-            raise SystemExit("--max-frames must be greater than zero for --source wifi")
-        frames, wifi_rtt_ms = load_wifi_frames(
-            args.sender_ip, args.port, args.max_frames, args.receive_timeout, args.control_port,
-        )
-        source_fps = args.source_fps
-        source_name = f"wifi://{args.sender_ip}:{args.port}"
+    if args.max_frames <= 0:
+        raise SystemExit("--max-frames must be greater than zero")
+    frames, wifi_rtt_ms = load_wifi_frames(
+        SENDER_IP, PORT, args.max_frames, RECEIVE_TIMEOUT, CONTROL_PORT,
+    )
+    source_fps = SOURCE_FPS
+    source_name = f"wifi://{SENDER_IP}:{PORT}"
     if not frames:
         raise SystemExit("No frames received from source")
-    paths = [path for path in sorted(root.rglob("*.onnx")) if "venv" not in path.parts and path.stem in SCRIPT_BY_MODEL]
-    if args.models:
-        selected = {MODEL_ALIASES[name] for name in args.models}
-        paths = [path for path in paths if path.stem in selected]
+    paths = [path for path in sorted(ROOT.rglob("*.onnx")) if "venv" not in path.parts and path.stem in SCRIPT_BY_MODEL]
     if not paths:
-        raise SystemExit("Selected models were not found")
-    if not paths:
-        raise SystemExit(f"No supported ONNX models found under {root}")
-    print(f"Benchmark: {source_name}; frames={len(frames)}; warmup={args.warmup}; threads={args.threads}")
+        raise SystemExit(f"No supported ONNX models found under {ROOT}")
+    print(f"Benchmark: {source_name}; frames={len(frames)}; warmup={WARMUP}; threads={THREADS}")
     rows = []
     for index, path in enumerate(paths, 1):
         print(f"[{index}/{len(paths)}] {DISPLAY_NAMES.get(path.stem, path.stem)}...", flush=True)
-        rows.append(benchmark_model(path, root, frames, source_fps, wifi_rtt_ms, args.warmup, args.max_frames, args.threads, None if args.no_video else args.output_dir))
+        rows.append(benchmark_model(path, ROOT, frames, source_fps, wifi_rtt_ms, WARMUP, args.max_frames, THREADS, OUTPUT_DIR))
     print_table(rows, source_name)
-    if args.output_csv:
-        write_csv(rows, args.output_csv)
-        print(f"CSV written to: {args.output_csv}")
+    write_csv(rows, OUTPUT_CSV)
+    print(f"CSV written to: {OUTPUT_CSV}")
 
 
 if __name__ == "__main__":
